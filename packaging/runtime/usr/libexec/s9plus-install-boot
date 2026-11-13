@@ -1,0 +1,126 @@
+#!/usr/bin/python3
+"""Install a packaged BOOT only on the matching phone, with backup/readback.
+
+Image builders set S9PLUS_IMAGE_BUILD=1, which stages the package without
+opening any block device. No reboot is performed by this hook.
+"""
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+
+
+def digest(path, count=None):
+    h = hashlib.sha256()
+    with path.open('rb') as stream:
+        while count is None or count > 0:
+            block = stream.read(1024 * 1024 if count is None else min(count, 1024 * 1024))
+            if not block:
+                break
+            h.update(block)
+            if count is not None:
+                count -= len(block)
+    if count:
+        raise RuntimeError('short block-device read')
+    return h.hexdigest()
+
+
+def verify_candidate(directory):
+    manifest = json.loads((directory / 'kernel-manifest.json').read_text())
+    boot = directory / 'boot-s9plus.img'
+    if manifest['variant'] not in ('full', 'embedding'):
+        raise ValueError('unknown kernel variant')
+    if not manifest['release'].endswith('-s9plus-' + manifest['variant']):
+        raise ValueError('variant/release mismatch')
+    if not 2048 < boot.stat().st_size <= 57671680:
+        raise ValueError('invalid BOOT size')
+    with boot.open('rb') as stream:
+        if stream.read(8) != b'ANDROID!':
+            raise ValueError('invalid BOOT header')
+        stream.seek(-16, 2)
+        if stream.read() != b'SEANDROIDENFORCE':
+            raise ValueError('invalid BOOT trailer')
+    if digest(boot) != manifest['boot_sha256']:
+        raise ValueError('BOOT checksum mismatch')
+    return manifest, boot
+
+
+def boot_partition():
+    # Read the kernel's partition names; never guess an sda partition number.
+    matches = []
+    for entry in Path('/sys/class/block').iterdir():
+        values = dict(line.split('=', 1) for line in (entry / 'uevent').read_text().splitlines() if '=' in line)
+        if values.get('PARTNAME') == 'BOOT':
+            matches.append(Path('/dev') / values['DEVNAME'])
+    if len(matches) != 1:
+        raise RuntimeError('expected exactly one BOOT partition')
+    target = matches[0].resolve(strict=True)
+    if not stat.S_ISBLK(target.stat().st_mode):
+        raise RuntimeError('BOOT is not a block device')
+    size = int(subprocess.check_output(['blockdev', '--getsize64', str(target)], text=True))
+    if size != 57671680:
+        raise RuntimeError('unexpected BOOT partition size')
+    return target, size
+
+
+def main():
+    manifest, boot = verify_candidate(Path(sys.argv[1]))
+    if os.environ.get('S9PLUS_IMAGE_BUILD') == '1':
+        print('Image assembly: BOOT staged; no block-device write')
+        return
+    if os.geteuid() != 0:
+        raise RuntimeError('must be root')
+    compatible = Path('/proc/device-tree/compatible').read_bytes().split(b'\0')
+    if b'samsung,star2lte' not in compatible:
+        raise RuntimeError('BOOT updates are restricted to samsung,star2lte')
+    lock = open('/run/s9plus-kernel-update.lock', 'w')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    modules = Path('/lib/modules') / manifest['release']
+    if not (modules / 'modules.dep').is_file():
+        raise RuntimeError('matching modules must be installed before BOOT')
+    for item in manifest['modules']:
+        path = Path('/') / item['path']
+        if not path.exists() and item['path'].startswith('usr/lib/modules/'):
+            path = Path('/') / item['path'][4:]
+        if digest(path) != item['sha256']:
+            raise RuntimeError('module integrity check failed: ' + str(path))
+    target, size = boot_partition()
+    backup_dir = Path('/var/lib/s9plus-kernel/backups')
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    before = digest(target, size)
+    backup = backup_dir / (before + '.img')
+    if not backup.exists():
+        with target.open('rb') as src, backup.open('xb') as dst:
+            remaining = size
+            while remaining:
+                block = src.read(min(1024 * 1024, remaining))
+                if not block:
+                    raise RuntimeError('short backup read')
+                dst.write(block)
+                remaining -= len(block)
+            dst.flush()
+            os.fsync(dst.fileno())
+    if backup.stat().st_size != size or digest(backup) != before:
+        raise RuntimeError('BOOT backup verification failed')
+    try:
+        with boot.open('rb') as src, target.open('r+b', buffering=0) as dst:
+            while block := src.read(1024 * 1024):
+                if dst.write(block) != len(block):
+                    raise RuntimeError('short BOOT write')
+            os.fsync(dst.fileno())
+        if digest(target, boot.stat().st_size) != manifest['boot_sha256']:
+            raise RuntimeError('BOOT readback verification failed')
+    except BaseException:
+        subprocess.run(['dd', 'if=' + str(backup), 'of=' + str(target), 'bs=1M', 'conv=fsync'], check=True)
+        if digest(target, size) != before:
+            raise RuntimeError('BOOT restore failed; use recovery before rebooting')
+        raise
+    print('Installed ' + manifest['release'] + '; reboot when ready. Backup: ' + str(backup))
+
+
+if __name__ == '__main__':
+    main()

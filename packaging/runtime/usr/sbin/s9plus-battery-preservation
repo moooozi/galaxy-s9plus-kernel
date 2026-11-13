@@ -1,0 +1,53 @@
+#!/usr/bin/python3
+"""Configure persistent battery thresholds, or apply them during boot."""
+import argparse
+import json
+import os
+from pathlib import Path
+import tempfile
+
+CONFIG = Path('/etc/s9plus/battery-preservation.json')
+SUPPLY = Path('/sys/class/power_supply/max77705-charger')
+
+
+def apply(start, stop):
+    if not 0 <= start < stop <= 100:
+        raise ValueError('thresholds must satisfy 0 <= start < stop <= 100')
+    # Lower start first so both increasing and decreasing stop remain valid.
+    (SUPPLY / 'charge_control_start_threshold').write_text('0\n')
+    (SUPPLY / 'charge_control_end_threshold').write_text(str(stop) + '\n')
+    (SUPPLY / 'charge_control_start_threshold').write_text(str(start) + '\n')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--stop', type=int, help='stop percentage; 100 disables preservation')
+    parser.add_argument('--start', type=int, help='resume percentage; defaults to stop minus two')
+    parser.add_argument('--apply', action='store_true', help='apply saved settings, retaining kernel defaults if absent')
+    args = parser.parse_args()
+    if args.apply:
+        if CONFIG.exists():
+            settings = json.loads(CONFIG.read_text())
+            apply(settings['start'], settings['stop'])
+        return
+    if args.stop is None:
+        print('Start:', (SUPPLY / 'charge_control_start_threshold').read_text().strip())
+        print('Stop:', (SUPPLY / 'charge_control_end_threshold').read_text().strip())
+        return
+    if os.geteuid() != 0:
+        raise SystemExit('Use sudo to change battery settings')
+    start = args.start if args.start is not None else max(0, args.stop - 2)
+    apply(start, args.stop)
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=CONFIG.parent, delete=False) as stream:
+        path = Path(stream.name)
+        json.dump({'start': start, 'stop': args.stop}, stream)
+        stream.write('\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    path.replace(CONFIG)
+    print(f'Preservation saved: resume at {start}%, stop at {args.stop}% (100 disables it)')
+
+
+if __name__ == '__main__':
+    main()

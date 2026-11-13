@@ -1,0 +1,9 @@
+{
+  "url": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+  "series": "7.3",
+  "policy": "latest-supported-patch",
+  "releases_url": "https://www.kernel.org/releases.json",
+  "mirrors": [
+    "https://github.com/gregkh/linux.git"
+  ]
+}

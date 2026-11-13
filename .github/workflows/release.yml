@@ -1,0 +1,242 @@
+name: Kernel packages
+run-name: Kernel packages
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      test_build:
+        description: Build test artifacts only; never publish releases or Pages
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: kernel-release
+  cancel-in-progress: false
+jobs:
+  select:
+    if: (github.event_name == 'workflow_dispatch' && inputs.test_build == true) || vars.PRODUCTION_SIGNING_READY == 'true'
+    runs-on: ubuntu-26.04
+    outputs:
+      build: ${{ steps.select.outputs.build }}
+      tag: ${{ steps.select.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          mkdir -p dist
+          python3 scripts/ci/prepare-release.py
+      - uses: actions/upload-artifact@v7
+        if: steps.select.outputs.build == 'true'
+        with:
+          name: kernel-selection
+          path: dist/kernel-selection.json
+  check:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 scripts/ci/check-source.py
+      - name: Test encrypted GPG subkey integration
+        run: python3 .github/actions/gpg-signing/test-signing.py
+      - name: Validate workflow syntax
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
+  signing:
+    needs: select
+    if: needs.select.outputs.build == 'true'
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/gpg-signing
+        with:
+          private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+          fingerprint: ${{ vars.GPG_SIGNING_KEY_FINGERPRINT }}
+      - name: Verify APK signing key matches the public repository key
+        env:
+          APK_PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
+        run: |
+          test -n "$APK_PRIVATE_KEY"
+          umask 077
+          key_dir=$(mktemp -d "$RUNNER_TEMP/s9plus-rsa-XXXXXX")
+          trap 'rm -rf "$key_dir"' EXIT
+          printf '%s\n' "$APK_PRIVATE_KEY" > "$key_dir/private.pem"
+          openssl rsa -in "$key_dir/private.pem" -pubout -out "$key_dir/public.pem"
+          cmp "$key_dir/public.pem" keys/s9plus.rsa.pub
+          printf '%s\n' 'Galaxy S9+ RSA signing verification' > "$key_dir/proof.txt"
+          openssl dgst -sha256 -sign "$key_dir/private.pem" -out "$key_dir/proof.sig" "$key_dir/proof.txt"
+          openssl dgst -sha256 -verify keys/s9plus.rsa.pub -signature "$key_dir/proof.sig" "$key_dir/proof.txt"
+      - name: Remove ephemeral GPG keyring
+        if: always()
+        run: python3 .github/actions/gpg-signing/cleanup.py
+  build:
+    needs: [select, check, signing]
+    if: needs.select.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [full, embedding]
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: kernel-selection
+          path: dist
+      - name: Record build runner resources
+        run: |
+          uname -m
+          nproc
+          free -h
+          df -h .
+      - name: Compile ARM64 kernel and uniLoader
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          # Keep host-written signatures and secret staging owned by the runner.
+          mkdir -p .build/signing dist/bundle
+          docker run --rm -v "$PWD:/work" -w /work -e VARIANT \
+            -e KERNEL_OUT=/work/dist/bundle ubuntu:24.04 bash scripts/ci/build-mobile-kernel.sh
+      - name: Verify bundle and create distribution packages
+        run: |
+          (cd dist/bundle && sha256sum -c SHA256SUMS)
+          python3 scripts/ci/package-distributions.py dist/bundle dist/packages
+      - name: Sign Alpine package
+        env:
+          APK_PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
+        run: |
+          test -n "$APK_PRIVATE_KEY"
+          mkdir -p .build/signing
+          umask 077
+          printf '%s\n' "$APK_PRIVATE_KEY" > .build/signing/s9plus.rsa
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e PACKAGER_PRIVKEY=/work/.build/signing/s9plus.rsa alpine:3.24 \
+            sh scripts/ci/build-apk.sh /work/dist/packages/apkbuild /work/dist/apks
+          find dist/apks -name '*.apk' -exec cp '{}' dist/packages/ \;
+          rm -f .build/signing/s9plus.rsa
+      - name: Import owner GPG signing key
+        uses: ./.github/actions/gpg-signing
+        with:
+          private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+          fingerprint: ${{ vars.GPG_SIGNING_KEY_FINGERPRINT }}
+      - name: Sign kernel bundle checksums
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          "$GPG_SIGNING_WRAPPER" --armor --detach-sign --output dist/bundle/SHA256SUMS.asc dist/bundle/SHA256SUMS
+      - name: Collect release assets
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          mkdir -p "dist/assets/$VARIANT"
+          cp dist/packages/*.deb dist/packages/*.apk "dist/assets/$VARIANT/"
+          cp dist/bundle/* "dist/assets/$VARIANT/"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kernel-${{ matrix.variant }}
+          path: dist/assets/
+          compression-level: 0
+          retention-days: 7
+      - name: Remove ephemeral GPG keyring
+        if: always()
+        run: python3 .github/actions/gpg-signing/cleanup.py
+  publish:
+    if: inputs.test_build != true && vars.PRODUCTION_SIGNING_READY == 'true'
+    needs: [select, build]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: kernel-selection
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: kernel-*
+          merge-multiple: true
+          path: dist/assets
+      - name: Restore cumulative package repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages; then
+            git fetch origin gh-pages
+            mkdir -p site
+            git archive FETCH_HEAD | tar -x -C site
+          else
+            mkdir -p site
+          fi
+      - name: Import owner GPG signing key
+        uses: ./.github/actions/gpg-signing
+        with:
+          private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+          fingerprint: ${{ vars.GPG_SIGNING_KEY_FINGERPRINT }}
+      - name: Sign package indexes
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          APK_PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
+          APK_SIGNING_KEY: /work/.build/signing/s9plus.rsa
+        run: |
+          test -n "$APK_PRIVATE_KEY"
+          umask 077
+          mkdir -p .build/signing dist/packages
+          printf '%s\n' "$APK_PRIVATE_KEY" > .build/signing/s9plus.rsa
+          find dist/assets -name '*.deb' -o -name '*.apk' | while read -r p; do cp "$p" dist/packages/; done
+          sudo apt-get update
+          sudo apt-get install -y apt-utils dpkg-dev
+          bash scripts/ci/publish-index.sh site
+          rm -f .build/signing/s9plus.rsa
+      - name: Publish immutable release assets and sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.select.outputs.tag }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          mkdir -p dist/release
+          for variant in full embedding; do
+            tar -C "dist/assets/$variant" -I 'zstd -T0 -3' -cf "dist/release/s9plus-$variant.tar.zst" .
+            cp dist/assets/"$variant"/*.deb dist/assets/"$variant"/*.apk dist/release/
+          done
+          cp dist/kernel-selection.json dist/release/
+          (cd dist/release && sha256sum ./* > SHA256SUMS)
+          "$GPG_SIGNING_WRAPPER" --armor --detach-sign --output dist/release/SHA256SUMS.asc dist/release/SHA256SUMS
+          git -c user.name=moooozi -c user.email=92719420+moooozi@users.noreply.github.com tag -s "$TAG" "$GITHUB_SHA" -m "Galaxy S9+ $TAG"
+          git push origin "refs/tags/$TAG"
+          gh release create "$TAG" dist/release/* --target "$GITHUB_SHA" --title "Galaxy S9+ $TAG" \
+            --notes 'Full and embedding kernels, signed Debian/Alpine packages, BOOT, modules and corresponding sources. Reboot after a package update. New build artifacts require hardware validation before use on a primary device.'
+      - name: Save cumulative repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          git -C site init -b gh-pages
+          git -C site config user.name github-actions
+          git -C site config user.email github-actions[bot]@users.noreply.github.com
+          git -C site add .
+          git -C site -c gpg.program="$GPG_SIGNING_WRAPPER" -c user.signingkey="$GPG_SIGNING_KEY_FINGERPRINT!" -c commit.gpgsign=true commit -m 'Publish signed kernel package indexes'
+          git -C site remote add origin "$(git remote get-url origin)"
+          git -C site -c credential.helper='!gh auth git-credential' push --force origin HEAD:gh-pages
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v5
+      - name: Remove ephemeral GPG keyring
+        if: always()
+        run: python3 .github/actions/gpg-signing/cleanup.py

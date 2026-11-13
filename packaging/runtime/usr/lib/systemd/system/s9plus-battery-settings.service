@@ -1,0 +1,10 @@
+[Unit]
+Description=Apply saved Galaxy S9+ battery preservation settings
+After=systemd-udev-trigger.service
+ConditionPathExists=/etc/s9plus/battery-preservation.json
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/s9plus-battery-preservation --apply
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

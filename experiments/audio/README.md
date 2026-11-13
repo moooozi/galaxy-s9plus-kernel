@@ -1,0 +1,150 @@
+# Experimental S9+ speaker and headphone support
+
+User confirmed audible speaker playback on SM-G965F on 2026-11-02.
+Direct ALSA and protected PipeWire playback completed without pointer stalls,
+watchdog recoveries, DSP restarts or reported PipeWire errors. Automatic service
+loading survived reboot. Longer playback and volume testing remain outstanding.
+Headphone playback was user-confirmed on 2026-11-03 after bringing up the
+CS47L93 codec and applying its DAC volume-update bits. Microphone capture is
+disabled in the supported configuration; call audio is unsupported.
+
+On 2026-11-03 the user also confirmed the capped headphone volume and automatic
+speaker/headphone switching on unplug/replug, followed by manual selection of
+Speakers with headphones connected using the standard desktop ports. The capped module was installed
+for kernel 7.3.1-s9plus and reloaded successfully from its installed path;
+full reboot validation of this updated module remains outstanding.
+
+Driver adapted from Zerone-Laboratories/ztOS at commit
+94b35c2a1f4ceb568bc0ab60f5a1acebe7cfefaf, `audio/driver/snd-zrn-abox.c`
+(GPL-2.0). The checked-in driver is the actual tested adaptation: cp_vss is off,
+capture is off, digital gain is capped at 0x30, bottom analogue gain is 0x03,
+and boost is 0x10. Full Maxim DSM speaker protection is not implemented;
+retain these driver gain limits. The software crossover/high-pass/limiter
+was removed at the user’s request after poor sound and duplicate outputs were
+reported. The built-in ALSA speaker sink is the normal desktop output.
+
+## Build from the existing exact kernel
+
+In the original cross-build container, with this repository mounted at /work:
+
+```sh
+cd /work
+mkdir -p .build/audio-work/driver
+cp experiments/audio/driver/* .build/audio-work/driver/
+bash experiments/audio/build-modules.sh
+```
+
+Requires `.build/src/mainline/out` from the original 7.1.0-dirty build,
+including Module.symvers and vmlinux.o, and its GCC 13.3.0 ARM64 cross compiler.
+Output: seven modules under `.build/audio-work/modules`. No BOOT rebuild.
+Verify vermagic against the target kernel before installing.
+
+## Install on the target
+
+Use `/usr/lib/modules/7.1.0-dirty/extra/s9plus-audio/` for those seven modules,
+then run `depmod -a 7.1.0-dirty`. Install Ubuntu packages `alsa-utils`,
+`rtkit` and their dependencies. For newer kernels, build against the exact
+running kernel and use its module directory; do not mix module ABIs. The tested
+7.3.1-s9plus install replaced only `snd-zrn-abox.ko`, retaining its matching
+installed ALSA/I2C dependencies.
+Supply `calliope_sram.bin`, `calliope_dram.bin`, `calliope_iva.bin` from the
+owner's phone VENDOR partition to `/usr/lib/firmware/`; firmware is not included.
+Copy the rootfs overlay preserving `/lib -> usr/lib`, with root ownership:
+
+```sh
+# Run on the target, from this directory after transferring the source files.
+tar -C rootfs --owner=0 --group=0 -cf - . | tar -C / --keep-directory-symlink --no-same-owner --no-overwrite-dir -xpf -
+systemctl daemon-reload
+systemctl enable --now s9plus-audio.service
+```
+
+Restart the desktop PipeWire/WirePlumber services to pick up the configs.
+Use the built-in speaker output. No virtual speaker filter is installed.
+The loader retains `/var/lib/s9plus-audio/loading` after an interrupted load;
+inspect the previous boot logs before clearing it manually. No retries are
+automatically forced after a failed initialization.
+
+## Headphone gain ceiling
+
+Headphone DAC gain is capped at **-30 dB**, code68 (0.5 dB steps from-64dB).
+This corresponds to the user's accepted old40% setting: the old-18dB DAC
+combined with measured PipeWire amplitude0.254788 gives-29.876dB. The new
+ceiling rounds down to the next0.5dB step.
+
+The cap is in `s9plus-headphone-limit.h` and applied by `codec_write` to both
+headphone DAC registers. It preserves mute/update bits. Startup, reinsertion,
+ALSA mixer changes and direct PCM playback all share this guard. The maximum
+is not a module parameter. The test suite exercises every16-bit write value
+and verifies unrelated codec registers are unchanged.
+
+The WirePlumber overlay uses software volume so the headphone route does not
+inherit speaker-mixer gain compensation. This configuration is not the gain
+ceiling: the kernel's DAC guard remains active when the sound server is absent.
+Both mobile image builds compile this same driver and include the same overlay.
+
+The device-specific `s9plus.conf` ALSA card profile exposes standard Speakers
+and Headphones ports on the shared PCM. The driver reports `Headphone Jack`
+and provides independent `Speaker Playback Switch` and `Headphone Playback
+Switch` controls. WirePlumber's existing policy handles automatic switching,
+manual port selection and per-port volume memory. Speakers remain selectable
+with headphones connected; the driver no longer forces headphones on insertion.
+No custom switching daemon or desktop policy is needed.
+
+The two mixer paths fix headphone gain at 68 and speaker gain at 48 (the existing
+driver maximum), leaving desktop volume and mute in software. Generic path
+probing can zero the headphone gain even with `api.alsa.soft-mixer = true`, so
+these hardware-specific gain declarations remain necessary. Port changes only
+gate/mute outputs; already initialized headphone clocks are retained. Custom UCM
+files from the earlier experiment are unnecessary; UCM is disabled for this card.
+
+Use `Headphone Playback Volume` for direct ALSA volume changes; its maximum
+is68 (-30dB). `Headphone Jack` exposes insertion state. The desktop selects
+the output using the standard playback switches. Capture and voice paths
+must stay disabled in this profile. Playback loudness still varies with source
+material and headphones; the ceiling is a relative hardware gain bound.
+
+## Firmware fault handling — November 12 validation
+
+The November 4 trace's system message250 (`0xfa`) is **ABOX_REPORT_FAULT**,
+not periodic housekeeping. The pinned LineageOS24 kernel's
+`include/sound/samsung/abox_ipc.h` assigns that value, and
+`sound/soc/samsung/abox/abox.c:abox_system_ipc_handler` identifies param1=1 as
+a data abort. Its raw param2/3 were5/`fffffff4`; the cause is not established.
+Source revision: ExyHyperBrick/android_kernel_samsung_exynos9810
+`e5906667068efe49ad6a5494296f77965f2e5c5e`.
+Pinned sources: [IPC values and message layout](https://github.com/ExyHyperBrick/android_kernel_samsung_exynos9810/blob/e5906667068efe49ad6a5494296f77965f2e5c5e/include/sound/samsung/abox_ipc.h),
+[fault handler](https://github.com/ExyHyperBrick/android_kernel_samsung_exynos9810/blob/e5906667068efe49ad6a5494296f77965f2e5c5e/sound/soc/samsung/abox/abox.c),
+and [saved-register layout](https://github.com/ExyHyperBrick/android_kernel_samsung_exynos9810/blob/e5906667068efe49ad6a5494296f77965f2e5c5e/sound/soc/samsung/abox/abox_dbg.c).
+
+The driver recognizes this notification before acknowledging its mailbox.
+It retains four raw fault words and, when the firmware's saved-register pointer
+fits completely inside owned SRAM/DRAM/IVA memory, r0..r14 and the saved PC.
+Other pointers remain raw diagnostics and are never dereferenced. This follows
+the register layout in the same revision's `abox_dbg.c`.
+
+A fault marks the DSP unavailable and quiesces its AP interrupt without sleeping
+in the handler. The existing watchdog stops media streams and mutes the speaker
+amplifiers, then uses the existing DSP restart path. The default remains
+**no audio-domain power cycle**. At most three recovery attempts are allowed
+after a firmware fault, with the existing five-second minimum between attempts.
+A new firmware boot never resets that budget. Exhaustion keeps audio unavailable
+and its interrupt quiesced until an explicit `restart_now=1` or module reload.
+The fallback mailbox poller skips reception while a firmware fault is pending.
+
+Read-only diagnostics under `/sys/module/snd_zrn_abox/parameters/`:
+
+- `firmware_fault_reports`, `firmware_fault_recoveries`, `firmware_fault_blocked`
+- `firmware_fault_params`: raw param1, param2, param3, saved-register address
+- `firmware_fault_regs_valid`, `firmware_fault_regs`: whether the address was
+  inside a supported mapping and the sixteen captured register words
+
+Host regression tests replay repeated fault bursts, firmware boots, recovery
+budget exhaustion, explicit retries, counter saturation and dump-pointer bounds.
+The module compiles against the kernel-integration build and passed a phone
+trial on kernel #8. A startup firmware exception caused one automatic recovery;
+a subsequent 120.181 s diagnostic interval had no additional audio IRQs with
+both streams closed. Three-second low-amplitude direct ALSA playback completed
+without another DSP restart or stream-watchdog recovery. Two normal reboots
+retained the bounded startup recovery behavior. The underlying exception is
+unresolved, and battery savings or fresh audible/headphone verification are not
+claimed. The previous matching module remains available for rollback.
