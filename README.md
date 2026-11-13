@@ -92,6 +92,18 @@ retains the saved file. A fresh image provides its own saved defaults; package u
 The old temporary 80% test on the Ubuntu validation phone is separate and is
 not included here.
 
+## Quiet startup
+
+The S9+ uniLoader configuration prints only errors and preserves firmware
+framebuffer contents until a message needs the console. Its initialization,
+relocation, cache maintenance and charger-mode handoff remain intact. Linux uses
+`quiet splash loglevel=4 systemd.show_status=false systemd.log_target=journal-or-kmsg`;
+errors remain visible and normal messages stay available in the kernel/journal
+logs. The small framebuffer console logo is suppressed. S-Boot's own display
+and warnings are outside this configuration. Bundles include `loader.config`
+with a manifest hash so the actual compiled loader settings can be inspected.
+The matching userspace splash/theme settings are shipped separately by images.
+
 ## Build and validate
 
 ```
