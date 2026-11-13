@@ -35,13 +35,12 @@ def main():
     src = work / 'src/mainline'
     out = src / 'out'
     manifest = json.loads(selection.read_text())
-    variant = os.environ['VARIANT']
+    variant = 'unified'
     compat = destination / 'libwakelock-no-suspend.so'
-    if variant == 'full':
-        shutil.copyfile(work / 'sensors-compat/libwakelock-no-suspend.so', compat)
-        manifest['sensor_compat_sha256'] = sha256(compat)
+    shutil.copyfile(work / 'sensors-compat/libwakelock-no-suspend.so', compat)
+    manifest['sensor_compat_sha256'] = sha256(compat)
     release = (out / 'include/config/kernel.release').read_text().strip()
-    if release != manifest['version'] + '-s9plus-' + variant:
+    if release != manifest['version'] + '-s9plus':
         raise ValueError(f'Kernel release mismatch: {release}')
     stage = work / 'module-stage'
     modules = stage / 'usr/lib/modules' / release
@@ -52,12 +51,11 @@ def main():
         target = modules / path.relative_to(installed)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
-    if variant == 'full':
-        for kind, name in [('audio', 'snd-zrn-abox.ko'), ('bluetooth', 'zrn-bt.ko'),
-                           ('sensors', 'zrn-bbd.ko'), ('sensors', 's9plus-sensor-iio.ko')]:
-            target = modules / f'extra/s9plus-{kind}' / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(work / f'{kind}-driver' / name, target)
+    for kind, name in [('audio', 'snd-zrn-abox.ko'), ('bluetooth', 'zrn-bt.ko'),
+                       ('sensors', 'zrn-bbd.ko'), ('sensors', 's9plus-sensor-iio.ko')]:
+        target = modules / f'extra/s9plus-{kind}' / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(work / f'{kind}-driver' / name, target)
     module_manifest = []
     for path in sorted(modules.rglob('*.ko')):
         vermagic = subprocess.check_output(['modinfo', '-F', 'vermagic', str(path)], text=True).strip()

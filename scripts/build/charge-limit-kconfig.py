@@ -13,7 +13,7 @@ config S9PLUS_CHARGE_LIMIT
 	help
 	  Enforce configurable charging hysteresis in the charger
 	  driver. Missing or invalid capacity inhibits charging. Used by the
-	  embedding variant defaults to 65/63; the full variant to 100/98.
+	  shared kernel defaults to no added limit (100/98). Images apply policy.
 
 config S9PLUS_CHARGE_LIMIT_DEFAULT
 \tint "Default Galaxy S9+ charge stop percentage"

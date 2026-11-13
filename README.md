@@ -9,29 +9,32 @@ Independent kernel releases for SM-G965F (`samsung,star2lte`, Exynos 9810).
 The [image repository](https://github.com/moooozi/galaxy-s9plus-mainline-linux)
 assembles Debian/postmarketOS images from these released packages.
 
-| Variant | Purpose | Preservation default |
-| --- | --- | --- |
-| `full` | postmarketOS Plasma Mobile and Phosh | Disabled (stop 100%) |
-| `embedding` | Headless Debian 13 | Stop 65%, resume 63% |
+One shared kernel and module set supports headless Debian 13, postmarketOS
+Plasma Mobile and postmarketOS Phosh. The package is `linux-s9plus`, its kernel
+release is `<version>-s9plus`, and the bundle manifest identifies it as `unified`.
+Audio, Bluetooth, graphics, touch and sensors remain available in every kernel.
+Images choose which optional hardware services to activate.
 
-Embedding removes audio, Bluetooth, DRM/framebuffer graphics, touch, IIO sensors
-and media support. UFS, USB networking/serial, Wi-Fi, charging, cpufreq and the
-conservative A55 idle driver remain. Removing the display stack does not prove
-that firmware-initialized display hardware is powered down; actual headless
-screen-off behavior and whole-device consumption require hardware validation.
+Charging defaults belong to the images: Debian stops at 65%, resumes at 63%;
+mobile images default to no added limit. The kernel starts with no added limit;
+image settings apply once userspace starts. This does not enforce 65% before
+userspace, in recovery or while another OS is running.
+
+Headless display shutdown and whole-device consumption need hardware validation.
+A shared graphics driver alone does not establish either. No second stripped
+kernel is built or published.
 
 ## Releases and updates
 
 Actions checks kernel.org every six hours and tracks only supported stable
 7.3.x patches. It never switches to 7.4 or any later series. If no supported
-7.3.x release remains, selection stops with an explicit error. Published versions never downgrade. Both variants
-are built from the same exact upstream commit. Resolution/fetch can use Greg
+7.3.x release remains, selection stops with an explicit error. Published versions never downgrade. The kernel is built from one exact upstream commit. Resolution/fetch can use Greg
 Kroah-Hartman’s GitHub stable-tree mirror when kernel.org is unreachable; the
 resolved commit is recorded and verified before export. A release is published only after
-both builds and source checks succeed. Bump `release-policy.json`'s
+the build and source checks succeed. Bump `release-policy.json`'s
 `package_revision` for a new port-driver/package revision of the same kernel.
 
-GitHub Releases contains Debian/Alpine packages and per-variant bundles with
+GitHub Releases contains Debian/Alpine packages and a shared bundle with
 BOOT, matching modules, configuration, manifests, checksums and corresponding
 kernel/port/loader source. GitHub Pages hosts cumulative, signed APT and APK
 indexes. Only public repository keys live in this checkout. Production CI signing keys
@@ -55,7 +58,7 @@ postmarketOS images install `keys/s9plus.rsa.pub` in `/etc/apk/keys` and add:
 https://moooozi.github.io/galaxy-s9plus-kernel/apk
 ```
 
-`apt upgrade` / `apk upgrade` delivers the selected variant's kernel. Package
+`apt upgrade` / `apk upgrade` delivers the shared kernel. Package
 hooks verify the model, BOOT size, matching module hashes, full BOOT backup and
 candidate hash before writing BOOT, then verify readback. A failed candidate
 write attempts backup restoration and verifies it. The hooks never reboot.
@@ -85,7 +88,7 @@ s9plus-battery-preservation               # show current thresholds
 The tool saves `/etc/s9plus/battery-preservation.json`; the image enables the
 service that reapplies it at boot. A desktop power tool can also write the
 standard sysfs thresholds, but direct writes alone are volatile. A kernel update
-retains the saved file. A fresh image uses the variant's compiled-in defaults.
+retains the saved file. A fresh image provides its own saved defaults; package updates leave that file intact.
 The old temporary 80% test on the Ubuntu validation phone is separate and is
 not included here.
 
@@ -95,19 +98,17 @@ not included here.
 python3 scripts/ci/check-source.py
 mkdir -p dist
 python3 scripts/ci/resolve-kernel.py > dist/kernel-selection.json
-docker run --rm -v "$PWD:/work" -w /work -e VARIANT=full \
-  -e KERNEL_OUT=/work/dist/full ubuntu:24.04 bash scripts/ci/build-mobile-kernel.sh
+docker run --rm -v "$PWD:/work" -w /work -e KERNEL_OUT=/work/dist/unified ubuntu:24.04 bash scripts/ci/build-mobile-kernel.sh
 ```
 
-Use a fresh `BUILD` directory per build. Set `VARIANT=embedding` for the server
-kernel. The builder exports a locked source commit, applies guarded patches,
+Use a fresh `BUILD` directory per build. The builder exports a locked source commit, applies guarded patches,
 compiles all configured modules and verifies vermagic/depmod before packaging.
 `package-distributions.py` creates Debian packages and precompiled APKBUILD
 inputs; Alpine's `abuild` packages those files without recompiling the kernel.
 
 The parent port's [hardware validation](https://github.com/moooozi/galaxy-s9plus-mainline-linux/blob/kernel-driver-integration-20261112/docs/driver-validation-2026-11-12.md)
 is for kernel 7.3.1, CPUs2/3 idle, guarded sensor startup and bounded audio
-recovery. New 7.3.4 variants and the preservation worker need their own device
+recovery. The new shared 7.3.4 kernel and the preservation worker need their own device
 trial. Wider CPU/SoC idle, system suspend, camera, cellular/call audio and
 microphones remain unsupported or unvalidated. CPU idle still starts disabled
 until the existing userspace guard confirms it can enable only CPUs2/3.

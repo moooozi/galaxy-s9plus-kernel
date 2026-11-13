@@ -35,4 +35,4 @@ exists = get('/releases/tags/' + tag) is not None
 Path('dist/kernel-selection.json').write_text(json.dumps(selection, indent=2) + '\n')
 with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
     output.write(f'build={str(not exists).lower()}\ntag={tag}\n')
-print(f'{tag}: ' + ('already released' if exists else 'building both variants'))
+print(f'{tag}: ' + ('already released' if exists else 'building the shared kernel'))

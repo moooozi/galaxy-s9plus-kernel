@@ -77,10 +77,6 @@ jobs:
   build:
     needs: [select, check, signing]
     if: needs.select.outputs.build == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [full, embedding]
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 120
     steps:
@@ -96,12 +92,10 @@ jobs:
           free -h
           df -h .
       - name: Compile ARM64 kernel and uniLoader
-        env:
-          VARIANT: ${{ matrix.variant }}
         run: |
           # Keep host-written signatures and secret staging owned by the runner.
           mkdir -p .build/signing dist/bundle
-          docker run --rm -v "$PWD:/work" -w /work -e VARIANT \
+          docker run --rm -v "$PWD:/work" -w /work \
             -e KERNEL_OUT=/work/dist/bundle ubuntu:24.04 bash scripts/ci/build-mobile-kernel.sh
       - name: Verify bundle and create distribution packages
         run: |
@@ -132,15 +126,13 @@ jobs:
         run: |
           "$GPG_SIGNING_WRAPPER" --armor --detach-sign --output dist/bundle/SHA256SUMS.asc dist/bundle/SHA256SUMS
       - name: Collect release assets
-        env:
-          VARIANT: ${{ matrix.variant }}
         run: |
-          mkdir -p "dist/assets/$VARIANT"
-          cp dist/packages/*.deb dist/packages/*.apk "dist/assets/$VARIANT/"
-          cp dist/bundle/* "dist/assets/$VARIANT/"
+          mkdir -p "dist/assets/unified"
+          cp dist/packages/*.deb dist/packages/*.apk "dist/assets/unified/"
+          cp dist/bundle/* "dist/assets/unified/"
       - uses: actions/upload-artifact@v7
         with:
-          name: kernel-${{ matrix.variant }}
+          name: kernel-unified
           path: dist/assets/
           compression-level: 0
           retention-days: 7
@@ -208,7 +200,7 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           mkdir -p dist/release
-          for variant in full embedding; do
+          for variant in unified; do
             tar -C "dist/assets/$variant" -I 'zstd -T0 -3' -cf "dist/release/s9plus-$variant.tar.zst" .
             cp dist/assets/"$variant"/*.deb dist/assets/"$variant"/*.apk dist/release/
           done
@@ -218,7 +210,7 @@ jobs:
           git -c user.name=moooozi -c user.email=92719420+moooozi@users.noreply.github.com tag -s "$TAG" "$GITHUB_SHA" -m "Galaxy S9+ $TAG"
           git push origin "refs/tags/$TAG"
           gh release create "$TAG" dist/release/* --target "$GITHUB_SHA" --title "Galaxy S9+ $TAG" \
-            --notes 'Full and embedding kernels, signed Debian/Alpine packages, BOOT, modules and corresponding sources. Reboot after a package update. New build artifacts require hardware validation before use on a primary device.'
+            --notes 'Shared kernel, signed Debian/Alpine packages, BOOT, modules and corresponding sources. Reboot after a package update. New build artifacts require hardware validation before use on a primary device.'
       - name: Save cumulative repository
         env:
           GH_TOKEN: ${{ github.token }}

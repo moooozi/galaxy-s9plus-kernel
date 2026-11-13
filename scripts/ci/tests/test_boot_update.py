@@ -23,7 +23,7 @@ class BootUpdate(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.blob = b'ANDROID!' + b'\0' * 4096 + b'SEANDROIDENFORCE'
         (self.root / 'boot-s9plus.img').write_bytes(self.blob)
-        self.manifest = {'variant':'embedding', 'release':'7.3.4-s9plus-embedding',
+        self.manifest = {'variant':'unified', 'version':'7.3.4', 'release':'7.3.4-s9plus',
                          'boot_sha256':hashlib.sha256(self.blob).hexdigest()}
         self.write_manifest()
     def tearDown(self):
@@ -44,3 +44,9 @@ class BootUpdate(unittest.TestCase):
         self.manifest['release'] = '7.3.4-s9plus-full'
         self.write_manifest()
         with self.assertRaises(ValueError): updater.verify_candidate(self.root)
+
+    def test_legacy_variant_is_rejected_even_with_matching_release(self):
+        for variant in ('full', 'embedding'):
+            self.manifest.update(variant=variant, release='7.3.4-s9plus-' + variant)
+            self.write_manifest()
+            with self.assertRaises(ValueError): updater.verify_candidate(self.root)

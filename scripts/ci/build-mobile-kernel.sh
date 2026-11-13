@@ -4,9 +4,6 @@ set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 export BUILD=${BUILD:-$REPO/.build/kernel-ci}
 WORK=$BUILD
-VARIANT=${VARIANT:?set VARIANT to full or embedding}
-case "$VARIANT" in full|embedding) ;; *) exit 1 ;; esac
-export VARIANT
 SOURCE_MANIFEST=${SOURCE_MANIFEST:-$REPO/dist/kernel-selection.json}
 OUT=${KERNEL_OUT:-$REPO/dist/mobile-kernel}
 [ "$(id -u)" = 0 ] || { echo 'Run in the build container as root' >&2; exit 1; }
@@ -66,27 +63,23 @@ sed -i 's/status = "disabled"; \/\* WLAN-STATUS \*\//status = "okay";/' "$SRC/ar
 cd "$SRC"
 export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 scripts/config --file out/.config --set-str INITRAMFS_SOURCE "$WORK/initramfs $WORK/initramfs-nodes.list" \
-    --set-str EXTRA_FIRMWARE_DIR "$WORK/firmware" --set-str LOCALVERSION "-s9plus-$VARIANT" -d LOCALVERSION_AUTO
-bash "$REPO/scripts/build/configure-variant.sh" "$SRC" "$VARIANT"
+    --set-str EXTRA_FIRMWARE_DIR "$WORK/firmware" --set-str LOCALVERSION "-s9plus" -d LOCALVERSION_AUTO
+bash "$REPO/scripts/build/configure-kernel.sh" "$SRC"
 make O=out olddefconfig
-python3 "$REPO/scripts/ci/check-variant.py" "$SRC/out/.config" "$VARIANT"
+python3 "$REPO/scripts/ci/check-config.py" "$SRC/out/.config"
 # Desktop Bluetooth availability relies on the kernel's real rfkill interface.
-if [ "$VARIANT" = full ]; then grep -qx 'CONFIG_RFKILL=y' out/.config; fi
+grep -qx 'CONFIG_RFKILL=y' out/.config
 grep -qx 'CONFIG_S9PLUS_CPUIDLE=y' out/.config
 make O=out -j"${BUILD_JOBS:-$(nproc)}" Image exynos/exynos9810-star2lte.dtb
 make O=out -j"${BUILD_JOBS:-$(nproc)}" modules
 make O=out INSTALL_MOD_PATH="$WORK/module-install" modules_install
-if [ "$VARIANT" = full ]; then
 for kind in audio bluetooth sensors; do
     mkdir -p "$WORK/$kind-driver"
     cp -a "$REPO/experiments/$kind/driver/." "$WORK/$kind-driver/"
     make O=out M="$WORK/$kind-driver" -j"${BUILD_JOBS:-$(nproc)}" modules
 done
-fi
 mkdir -p "$WORK/sensors-compat"
-if [ "$VARIANT" = full ]; then
 aarch64-linux-gnu-gcc -shared -nostdlib -fPIC -Wl,-soname,libwakelock-no-suspend.so \
     -o "$WORK/sensors-compat/libwakelock-no-suspend.so" \
     "$REPO/experiments/sensors/compat/wakelock-no-suspend.c"
-fi
 python3 "$REPO/scripts/ci/package-mobile-kernel.py" "$WORK" "$OUT" "$SOURCE_MANIFEST"

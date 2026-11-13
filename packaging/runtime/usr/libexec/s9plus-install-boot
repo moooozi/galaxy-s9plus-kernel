@@ -32,10 +32,10 @@ def digest(path, count=None):
 def verify_candidate(directory):
     manifest = json.loads((directory / 'kernel-manifest.json').read_text())
     boot = directory / 'boot-s9plus.img'
-    if manifest['variant'] not in ('full', 'embedding'):
+    if manifest['variant'] != 'unified':
         raise ValueError('unknown kernel variant')
-    if not manifest['release'].endswith('-s9plus-' + manifest['variant']):
-        raise ValueError('variant/release mismatch')
+    if manifest['release'] != manifest['version'] + '-s9plus':
+        raise ValueError('kernel version/release mismatch')
     if not 2048 < boot.stat().st_size <= 57671680:
         raise ValueError('invalid BOOT size')
     with boot.open('rb') as stream:

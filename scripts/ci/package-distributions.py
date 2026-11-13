@@ -20,9 +20,10 @@ def main():
     manifest = json.loads((bundle / 'kernel-manifest.json').read_text())
     variant, version = manifest['variant'], manifest['version']
     revision = str(manifest['revision'])
-    if variant not in ('full', 'embedding') or not revision.isdecimal():
+    if (variant != 'unified' or not revision.isdecimal()
+            or manifest['release'] != version + '-s9plus'):
         raise ValueError('invalid package metadata')
-    name = 'linux-s9plus-' + variant
+    name = 'linux-s9plus'
     payload = out / 'payload'
     payload.mkdir(parents=True)
     # Producer owns this archive; still reject traversal, links and special files.
@@ -35,20 +36,25 @@ def main():
     target.mkdir(parents=True)
     for file in ('boot-s9plus.img', 'kernel-manifest.json', 'kernel.config'):
         shutil.copyfile(bundle / file, target / file)
-    shutil.copytree(REPO / 'packaging/runtime', payload, dirs_exist_ok=True)
-    shutil.copytree(REPO / 'experiments/cpuidle/rootfs', payload, dirs_exist_ok=True)
-    if variant == 'full':
-        for kind in ('audio', 'bluetooth', 'sensors'):
-            shutil.copytree(REPO / f'experiments/{kind}/rootfs', payload, dirs_exist_ok=True)
-        compat = payload / 'usr/local/lib/s9plus-sensors/compat/libwakelock-no-suspend.so'
-        compat.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(bundle / 'libwakelock-no-suspend.so', compat)
+    shutil.copytree(REPO / 'packaging/runtime', payload, dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    shutil.copytree(REPO / 'experiments/cpuidle/rootfs', payload, dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    for kind in ('audio', 'bluetooth', 'sensors'):
+        shutil.copytree(REPO / f'experiments/{kind}/rootfs', payload, dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    compat = payload / 'usr/local/lib/s9plus-sensors/compat/libwakelock-no-suspend.so'
+    compat.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(bundle / 'libwakelock-no-suspend.so', compat)
     # Distribution packages own /usr paths; adapt the tested local overlays.
     local = payload / 'usr/local'
     if local.exists():
         for path in list(local.iterdir()):
             shutil.copytree(path, payload / 'usr' / path.name, dirs_exist_ok=True)
         shutil.rmtree(local)
+    # Vendor units live under /usr, leaving image-owned masks/overrides in /etc
+    # intact when the kernel package is upgraded.
+    units = payload / 'etc/systemd/system'
+    if units.exists():
+        shutil.copytree(units, payload / 'usr/lib/systemd/system', dirs_exist_ok=True)
+        shutil.rmtree(units)
     for path in payload.rglob('*'):
         if path.is_file() and path.suffix not in ('.ko', '.so', '.img'):
             data = path.read_bytes()
@@ -75,7 +81,7 @@ Version: {version}-{revision}
 Architecture: arm64
 Maintainer: moooozi <moooozi@users.noreply.github.com>
 Depends: python3, kmod, util-linux
-Conflicts: linux-s9plus-{'embedding' if variant == 'full' else 'full'}
+Conflicts: linux-s9plus-full, linux-s9plus-embedding
 Section: kernel
 Priority: optional
 Description: Galaxy S9+ mainline kernel ({variant}) with matching uniLoader BOOT
@@ -113,7 +119,7 @@ pkgdesc="Galaxy S9+ mainline kernel ({variant}) and matching uniLoader BOOT"
 url="https://github.com/moooozi/galaxy-s9plus-kernel"
 arch="aarch64"
 license="GPL-2.0-only"
-depends="python3 kmod util-linux merge-usr !linux-s9plus-{'embedding' if variant == 'full' else 'full'}"
+depends="python3 kmod util-linux merge-usr !linux-s9plus-full !linux-s9plus-embedding"
 provides="linux-samsung-star2lte-mainline=$pkgver-r$pkgrel"
 install="$pkgname.post-install $pkgname.post-upgrade"
 source="payload.tar.gz"
